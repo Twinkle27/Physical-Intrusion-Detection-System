@@ -1,0 +1,536 @@
+#include <DHT.h>
+#include<NewPing.h>
+
+#include <SoftwareSerial.h>
+SoftwareSerial WiFi_Serial(2, 4); //WiFi module connected to pins 3-Rx, 4-Tx
+/*==========================================================================================*/
+/*CHANGE THE PARAMETERS BELOW ACCORDINGLY                                                   */
+/*==========================================================================================*/
+#define Device_No "sensor1"              // Enter Device No
+#define SSID      "Binatone"          //Your WiFi username
+#define PASS      "9876788182"      //Your WiFi Password
+#define DST_IP    "arshbir.com"    // URL / IP address
+#define username  "st346-09"
+/*==========================================================================================*/
+#define         MQ_PIN                       (A0)     //define which analog input channel you are going to use
+#define         RL_VALUE                     (20)    //define the load resistance on the board, in kilo ohms
+#define         RO_CLEAN_AIR_FACTOR          (10)    //RO_CLEAR_AIR_FACTOR=(Sensor resistance in clean air)/RO,
+                                                     //which is derived from the chart in datasheet
+ 
+/*============Software Related Macros ===============*/
+#define         CALIBARAION_SAMPLE_TIMES     (50)    //define how many samples you are going to take in the calibration phase
+#define         CALIBRATION_SAMPLE_INTERVAL  (500)   //define the time interal(in milisecond) between each samples in the
+                                                     //cablibration phase
+#define         READ_SAMPLE_INTERVAL         (50)    //define how many samples you are going to take in normal operation
+#define         READ_SAMPLE_TIMES            (5)     //define the time interal(in milisecond) between each samples in 
+                                                     //normal operation
+ 
+/*=============Application Related Macros============*/
+#define         GAS_LPG                      (0)
+#define         GAS_CH4                      (1)
+ 
+/*===============Globals=============================*/
+float           LPGCurve[3]  =  {3,   0,  -0.4};    //two points are taken from the curve. 
+                                                    //with these two points, a line is formed which is "approximately equivalent"
+                                                    //to the original curve. 
+                                                    //data format:{ x, y, slope}; point1: (lg1000, lg1), point2: (lg10000, lg0.4) 
+float           CH4Curve[3]  =  {3.3, 0,  -0.38};   //two points are taken from the curve. 
+                                                    //with these two points, a line is formed which is "approximately equivalent" 
+                                                    //to the original curve.
+                                                    //data format:{ x, y, slope}; point1: (lg2000, lg1), point2: (lg5000,  lg0.7) 
+float           Ro           =  10;                 //Ro is initialized to 10 kilo ohms
+
+
+/*==========================================================================================*/
+
+#define TRIGGER_PIN 12 // arduino pin to trigger pin
+#define ECHO_PIN 11 //  arduino pin to echo pin
+#define MAX_DISTANCE 200 // max distance to ping in cm 
+NewPing sonar(TRIGGER_PIN,ECHO_PIN,MAX_DISTANCE); // setup of pins configuration in newping func.
+int us;
+/*==========================================================================================*/
+int ledPin = 13; // for act as buzzer on Motion Detection
+int inputPin = 7 ; // the input of PIR sensor connected to pin 7
+int pirState = LOW; // we start, assuming no motion detected 
+int val = 0;// variable for reading the pin status
+/*==========================================================================================*/
+
+#define DHTPIN 5
+DHT dht(DHTPIN, DHT11);
+/*==========================================================================================*/
+
+int CNT = 7 ;
+float CELSIUS, HUM, LIGHT, uS,u,LPG,CH;
+char ultra,motion,leak;
+int i = 1;
+int Start_chck = 0;
+int HeartBeatinSec=1; // in seconds
+int debugMode= 0; // 0-off, 1-ON
+/*==========================================================================================*/
+/*                                         SETUP FUNCTION                                   */
+/*==========================================================================================*/
+
+void setup()
+{ 
+  Serial.begin(9600);  // Begin serial monitor to receive 9600 bits per second (BAUD RATE)
+  Serial.print("CALIBRATING THE SENSORS");
+  for(int t=1;t<=7;t++)
+  {
+    Serial.print('.');
+    delay(1000);
+  }
+  Serial.println("\n");
+    pinMode(ledPin,OUTPUT);  // declare LED as buzzer for PIR sensor
+   pinMode(9,OUTPUT);       // declare LED as buzzer for ultrasonic sensor
+  pinMode(10,OUTPUT);       // declare LEd as buzzer for MQ-6 sensor
+  pinMode(8,OUTPUT);//   declare LED as buzzer for DHT11 temp sensor 
+  WiFi_Serial.begin(9600);
+  WiFi_Serial.println("AT+UART_DEF=9600,8,1,0,0"); // set WiFi Send/Receive from 115200 bits per second (BAUD RATE) to 9600 bits per second
+  delay(2000);
+  WiFi_Serial.println("ATE0");
+  delay(200);
+  WiFi_Serial.println("AT+CWQAP"); // Disconnect from previous network connections
+  delay(500);
+  /*==========================================================================================*/
+
+  pinMode(DHTPIN, INPUT);  //configuring pin of dht11 sensor 
+/*==========================================================================================*/
+
+  pinMode(inputPin,INPUT);    //configuring pin of PIR sensor 
+  pinMode(13,OUTPUT);
+/*==========================================================================================*/
+
+    Ro = MQCalibration(MQ_PIN);                       //Calibrating the sensor. Please make sure the sensor is in clean air 
+                                                    //when you perform the calibration                    
+/*==========================================================================================*/
+
+/*==========================================================================================*/
+
+  dht.begin();
+
+}
+
+/*=============== MQResistanceCalculation ==================
+Input:   raw_adc - raw value read from adc, which represents the voltage
+Output:  the CALCULATED sensor resistance
+Remarks: The sensor and the load resistor forms a voltage divider. Given the voltage
+         across the load resistor and its resistance, the resistance of the sensor
+         could be derived.
+============================================================*/ 
+float MQResistanceCalculation(int raw_adc)
+{
+  return ( ((float)RL_VALUE*(1023-raw_adc)/raw_adc));
+}
+ 
+/*===================== MQCalibration ======================
+Input:   mq_pin - analog channel
+Output:  Ro of the sensor
+Remarks: This function assumes that the sensor is in clean air. It use  
+         MQResistanceCalculation to calculates the sensor resistance in clean air 
+         and then divides it with RO_CLEAN_AIR_FACTOR. RO_CLEAN_AIR_FACTOR is about 
+         10, which differs slightly between different sensors.
+============================================================*/ 
+float MQCalibration(int mq_pin)
+{
+  int i;
+  float val=0;
+ 
+  for (i=0;i<CALIBARAION_SAMPLE_TIMES;i++) {            //take multiple samples
+    val += MQResistanceCalculation(analogRead(mq_pin));
+    delay(CALIBRATION_SAMPLE_INTERVAL);
+  }
+  val = val/CALIBARAION_SAMPLE_TIMES;                   // CALCULATE the average value
+ 
+  val = val/RO_CLEAN_AIR_FACTOR;                        //divided by RO_CLEAN_AIR_FACTOR yields the Ro 
+                                                        //according to the chart in the datasheet 
+ 
+  return val; 
+}
+/*==================== MQRead ===============================
+Input:   mq_pin - analog channel
+Output:  Rs of the sensor
+Remarks: This function use MQResistanceCalculation to caculate the sensor resistenc (Rs).
+         The Rs changes as the sensor is in the different consentration of the target
+         gas. The sample times and the time interval between samples could be configured
+         by changing the definition of the macros.
+============================================================*/ 
+float MQRead(int mq_pin)
+{
+  int i;
+  float rs=0;
+ 
+  for (i=0;i<READ_SAMPLE_TIMES;i++) {
+    rs += MQResistanceCalculation(analogRead(mq_pin));
+    delay(READ_SAMPLE_INTERVAL);
+  }
+ 
+  rs = rs/READ_SAMPLE_TIMES;
+ 
+  return rs;  
+}
+ 
+/*=======================  MQGetGasPercentage ==================
+Input:   rs_ro_ratio - Rs divided by Ro
+         gas_id      - target gas type
+Output:  ppm of the target gas
+Remarks: This function passes different curves to the MQGetPercentage function which 
+        CALCULATES the ppm (parts per million) of the target gas.
+===============================================================*/ 
+int MQGetGasPercentage(float rs_ro_ratio, int gas_id)
+{
+  if ( gas_id == GAS_LPG ) {
+     return MQGetPercentage(rs_ro_ratio,LPGCurve);
+  } else if ( gas_id == GAS_CH4 ) {
+      return MQGetPercentage(rs_ro_ratio,CH4Curve);
+  }    
+ 
+  return 0;
+}
+ 
+/*========================  MQGetPercentage ===================
+Input:   rs_ro_ratio - Rs divided by Ro
+         pcurve      - pointer to the curve of the target gas
+Output:  ppm of the target gas
+Remarks: By using the slope and a point of the line. The x(logarithmic value of ppm) 
+         of the line could be derived if y(rs_ro_ratio) is provided. As it is a 
+         logarithmic coordinate, power of 10 is used to CONVERT the result to non-logarithmic 
+         value.
+===============================================================*/ 
+int  MQGetPercentage(float rs_ro_ratio, float *pcurve)
+{
+  return (pow(10, (((log(rs_ro_ratio)-pcurve[1])/pcurve[2]) + pcurve[0])));
+}
+/*==========================================================================================*/
+
+
+
+
+/*==========================================================================================*/
+/*            FUNCTION TO CHECK WIFI Module CONNECTED TO ARDUINO BOARD                      */
+/*==========================================================================================*/
+
+void WIFI_Check()
+{
+  WiFi_Serial.println("AT"); // send a Attention command
+  delay(500);
+  if (WiFi_Serial.available())
+  {
+    if (WiFi_Serial.find("OK")) // check with expected output
+    {
+      Serial.println("WIFI IS IN RANGE TO THE BOARD..!");
+      Serial.println();
+      Serial.println();
+      WiFi_Serial.println("AT+CWMODE=1"); //set mode to client mode
+      delay(500);
+      Start_chck = 1;
+      i = 1;
+    }
+  }
+  else
+  {
+    Serial.println("WIFI NOT PLUGGED..!");
+    Serial.println();
+    Serial.println("PLUG IN YOUR WIFI CHIP");
+    Serial.println();
+    Serial.println();
+  }
+}
+
+
+
+
+/*==========================================================================================*/
+/*            FUNCTION TO CHECK WIFI MODULE CONNECTED TO WIFI NETWORK                       */
+/*==========================================================================================*/
+void connectWiFi()
+{
+  WiFi_Serial.println("AT+CWJAP?"); //check if WIFI connected to any WiFi network
+  delay(5000);
+  if (WiFi_Serial.available())
+  {
+    if (WiFi_Serial.find("No AP")) //we receive reponse "No AP" when not connected to any network
+    {
+      if(debugMode){  Serial.println("NOT CONNECTED TO WIFI NETWORK");
+                      Serial.println(); Serial.println();
+                      Serial.println("Trying to Connect to WiFi Network");
+      }      
+      String cmd = "AT+CWJAP=\""; // connected to specified network passing mentioned WiFi username and password
+      cmd += SSID;
+      cmd += "\",\"";
+      cmd += PASS;
+      cmd += "\"";
+      WiFi_Serial.println(cmd);
+      if(debugMode)Serial.println(cmd);
+      delay(5000);
+      if (WiFi_Serial.available())
+      {
+        String RES_input = "";
+        while (WiFi_Serial.available()) // read the data into a variable as long as the
+        {
+          RES_input += (char)WiFi_Serial.read();
+        }
+        Serial.println(RES_input);
+        if (WiFi_Serial.find("WIFI CONNECTED"))
+        {
+          Serial.println("CONNECTED TO WIFI NETWORK..!");
+        }
+      }
+    }
+    else
+    {
+     
+      if(debugMode) { Serial.println("CONNECTED TO WIFI NETWORK..!");  Serial.println();    Serial.println(); }
+      post();
+      i = 0;
+    }
+  }
+}
+void getSensorValues()
+{
+
+/*==========================================================================================*/
+/*            TO CHECK STATUS OF DHT11 TEMP SENSOR                      */
+/*==========================================================================================*/
+
+      
+      HUM = dht.readHumidity();  
+      CELSIUS= dht.readTemperature();
+// Serial.println("TEMPERATURE : ");
+// Serial.print(CELSIUS);
+// Serial.println(" in degree Celsius ");
+ 
+// Serial.println("HUMIDITY : ");
+// Serial.println(HUM);
+// Serial.println(" " );
+if ( CELSIUS > 50)
+{
+  digitalWrite(8,HIGH);
+}
+
+/*==========================================================================================*/
+/*            TO CHECK STATUS OF ULTRASONIC SENSOR                      */
+/*==========================================================================================*/
+
+
+    Serial.println("--------Checking MAin Gate Status----------"); 
+ unsigned int uS = sonar.ping(); // Send ping, get ping time in microseconds (uS).
+  
+  if(uS / US_ROUNDTRIP_CM > 5)
+  {
+    Serial.println("\n");
+    Serial.println("\n");
+    Serial.println("*********door opended**********");
+    digitalWrite(9,HIGH);
+       us = 1; 
+  }
+  else
+  {
+    Serial.println("-------Status secure at ENTRANCE--------- ");
+      us = 0;
+    
+  }
+     
+     
+
+/*==========================================================================================*/
+/*            TO CHECK STATUS OF PIR SENSOR                      */
+/*==========================================================================================*/
+      
+    Serial.println("\n");
+    
+    Serial.println("/*=====================================================================*/");
+      Serial.println("----------Checking area Status------");
+  val = digitalRead(inputPin);  // read input value
+    if (val == HIGH) { 
+    // check if the input is HIGH
+      
+    digitalWrite(ledPin, HIGH);  // turn LED ON
+    if (pirState == LOW) {
+      // we have just turned on
+      Serial.println("Motion detected!!!!!!");
+      // We only want to print on the output change, not state
+      pirState = HIGH;
+    }
+  } 
+  else {
+        Serial.println("No motion detect, Area SECURED ");
+    digitalWrite(ledPin, LOW); // turn LED OFF
+    if (pirState == HIGH){
+      // we have just turned of
+      Serial.println("Motion ended!");
+      // We only want to print on the output change, not state
+      pirState = LOW;
+    }
+  } 
+/*==========================================================================================*/
+
+/*==========================================================================================*/
+/*            TO CHECK STATUS OF MQ-6 SENSOR                      */
+/*==========================================================================================*/
+
+     
+    LPG = MQGetGasPercentage(MQRead(MQ_PIN)/Ro,GAS_LPG);
+    CH = MQGetGasPercentage(MQRead(MQ_PIN)/Ro,GAS_CH4);
+
+   Serial.println("\n");
+   Serial.println("------Checking ROOM Atmosphere------------"); 
+
+   Serial.println("TEMPERATURE : ");
+ Serial.print(CELSIUS);
+ Serial.print(" in degree Celsius ");
+ 
+ Serial.print("   HUMIDITY : ");
+ Serial.print(HUM);
+ Serial.print("    " );
+
+   
+   Serial.print("LPG:"); 
+   Serial.print(LPG) ;
+
+   Serial.print( "ppm" );
+   Serial.print("        ");   
+   Serial.print("CH4::"); 
+   Serial.print(CH);
+   Serial.print( "ppm" );
+   Serial.print("\n");
+
+
+     
+     LPG = MQGetGasPercentage(MQRead(MQ_PIN)/Ro,GAS_LPG);
+    CH = MQGetGasPercentage(MQRead(MQ_PIN)/Ro,GAS_CH4);
+
+   if(LPG >50 || CH>50)
+   {
+    digitalWrite(10,HIGH);
+    }
+  else
+  {
+    digitalWrite(10,LOW);
+  }
+
+}
+
+ 
+/*==========================================================================================*/
+/*          FUNCTION TO POST THE DATA TO AXELTA OSMOSIS CLOUD PLATFORM                      */
+/*==========================================================================================*/
+void post()
+{ getSensorValues(); 
+  String data; //form the JSON string with the available sensor data
+   data += "{\"username\":\"" + String(username)  + "\",\"name\":\"";
+   data += String(Device_No);
+   data += "\",\"sample1\":\"";
+   data += String((unsigned char)CELSIUS);
+   data += "\",\"sample2\":\"";
+   data += String((unsigned char)HUM);
+  data += "\",\"sample3\":\"";
+   data += String((unsigned char)val);
+   data += "\",\"sample4\":\"";
+   data += String((unsigned char)us);
+   data += "\",\"sample5\":\"";
+   data += String((unsigned char)LPG);
+     
+    
+   data += "\"}";
+  
+  String uri = "/iot/cht/rec.php";
+  String port = "80";
+  String http_req = "POST " + uri + " HTTP/1.1\r\n" + "Host: " + DST_IP + ":" + port + "\r\n" + "Accept: *" + "/" + "*\r\n" + "Content-Length: " + data.length() + "\r\n" ;
+  String http_req1 = "Content-Type: application/json\r\n\r\n" ; // form the headder to post the WiFi data
+  //String http_req1 = "Content-Type: application/json" ;
+  if(debugMode) Serial.println("-->" + data + "<--");
+  if(debugMode) Serial.println("-->" +http_req + "<--");
+  if(debugMode) Serial.println("-->" +http_req1 + "<--");
+  int len_hedder1 = (http_req.length());
+  int len_hedder2 = (http_req1.length());
+  int len_data = data.length();
+  int Total_req_data_Length = (len_hedder1 + len_hedder2 + len_data); // total length of headder and data
+  Serial.println();
+  String cmd = "AT+CIPSTART=\"TCP\",\""; // open the tcp port for Axelta Osmosis
+  cmd += DST_IP;
+  cmd += "\",80";
+  if(debugMode) Serial.println(cmd);
+  WiFi_Serial.println(cmd);
+  delay(1000);
+  if (WiFi_Serial.available())
+  {
+    String RES_input = "";
+    while (WiFi_Serial.available()) // read the data into a variable as long as the
+    {
+      RES_input += (char)WiFi_Serial.read();
+    }
+    if(debugMode) Serial.println(RES_input);
+    if (WiFi_Serial.find("CONNECT"));
+    if(debugMode) Serial.print("AT+CIPSEND="); // start sending data to opened TCP port
+    WiFi_Serial.print("AT+CIPSEND=");
+    WiFi_Serial.println(Total_req_data_Length); //specify the total length of data
+    delay(100);
+    if (WiFi_Serial.available());
+    RES_input = "";
+    while (WiFi_Serial.available()) // read the data into a variable as long as the
+    {
+      RES_input += (char)WiFi_Serial.read();
+    }
+    Serial.println(RES_input);
+    {
+      if (WiFi_Serial.find(">")); // when ">" is response from WiFi that means it is ready to receive the total length of data 
+      {
+        WiFi_Serial.print(http_req); //Send headder first
+        WiFi_Serial.print(http_req1);
+        WiFi_Serial.print(data); //later send data
+        delay(1000);
+      }
+    }
+    if (WiFi_Serial.available()) // wait for response and print the same to terminal
+    {
+      delay(100);
+      String RES_input = "";
+      while (WiFi_Serial.available()) // read the data into a variable as long as the
+      {
+        RES_input += (char)WiFi_Serial.read();
+      }
+     
+      if(debugMode) Serial.println(RES_input);
+      if(debugMode) { Serial.println();Serial.println(); } 
+      
+    }
+  }
+}
+void loop()
+{
+  digitalWrite(13,LOW);
+  digitalWrite(9,LOW);
+  digitalWrite(8,LOW);
+  digitalWrite(10,LOW);
+   
+  while (1)
+  {
+    digitalWrite(13,LOW);
+  digitalWrite(9,LOW);
+  digitalWrite(8,LOW);
+  digitalWrite(10,LOW);
+  
+    if (CNT < 1) //CNT for Time Delay
+    {
+      if (Start_chck == 0)
+      {
+        WIFI_Check();
+        if (i == 1)
+        {
+          connectWiFi();
+        }
+      }
+      else
+      {
+        CNT = 7;
+        Start_chck = 0;
+      }
+    }
+    if(debugMode) Serial.println();
+    CNT--;CNT--; 
+    delay( HeartBeatinSec * 1000);
+  }
+
+    
+}
+
